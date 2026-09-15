@@ -43,6 +43,10 @@ FONT_CANDIDATES = [
     "C:\\Windows\\Fonts\\arial.ttf",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+]
+FONT_CANDIDATES_BOLD = [
+    "C:\\Windows\\Fonts\\arialbd.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 ]
 
@@ -50,11 +54,12 @@ FONT_CANDIDATES = [
 # =========================================================================
 # SMALL HELPERS
 # =========================================================================
-def get_font(size: int):
-    """Try to load a real TTF font at the requested size; fall back to
-    Pillow's built-in bitmap font if nothing is found (still works, just
-    won't scale as nicely)."""
-    for path in FONT_CANDIDATES:
+def get_font(size: int, bold: bool = False):
+    """Try to load a real TTF font at the requested size (regular or
+    bold); fall back to Pillow's built-in bitmap font if nothing is
+    found (still works, just won't scale as nicely)."""
+    candidates = FONT_CANDIDATES_BOLD if bold else FONT_CANDIDATES
+    for path in candidates:
         try:
             return ImageFont.truetype(path, size)
         except Exception:
@@ -198,15 +203,14 @@ def detect_image_text(image: Image.Image, min_conf: int):
     return boxes
 
 
-def apply_image_edit(image: Image.Image, box, new_text: str):
+def apply_image_edit(image: Image.Image, box, new_text: str, font_size: int, bold: bool = False):
     x0, y0 = box["left"], box["top"]
     x1, y1 = x0 + box["width"], y0 + box["height"]
     bg_color = get_bg_color(image, (x0, y0, x1, y1))
     text_color = get_text_color(image, (x0, y0, x1, y1))
     draw = ImageDraw.Draw(image)
     draw.rectangle([x0, y0, x1, y1], fill=bg_color)
-    font_size = max(10, int(box["height"] * 0.85))
-    font = get_font(font_size)
+    font = get_font(font_size, bold=bold)
     draw.text((x0, y0), new_text, fill=text_color, font=font)
     return image
 
@@ -406,10 +410,46 @@ def find_box_at_point(boxes, x, y):
 
 
 # =========================================================================
+# ACCESS CONTROL
+# =========================================================================
+def check_password():
+    """A simple password gate. The password itself is NOT in this code --
+    it lives in Streamlit Cloud's 'Secrets' settings for this app, which
+    only the app OWNER (you) can see or edit (Manage app -> Settings ->
+    Secrets). Anyone you share the link with must enter it to get in, but
+    they have no way to view or change it. Changing or deleting it there
+    instantly locks out everyone who doesn't already have a page open."""
+    try:
+        correct_password = st.secrets["APP_PASSWORD"]
+    except Exception:
+        st.title("🔒 App password not set up yet")
+        st.warning(
+            "The app owner needs to add an `APP_PASSWORD` secret first: "
+            "on share.streamlit.io, open this app -> Settings -> Secrets, "
+            "and add a line like:\n\nAPP_PASSWORD = \"your-chosen-password\""
+        )
+        st.stop()
+
+    if st.session_state.get("authenticated"):
+        return
+
+    st.title("🔒 Locked")
+    entered = st.text_input("Password", type="password")
+    if st.button("Unlock"):
+        if entered == correct_password:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Wrong password.")
+    st.stop()
+
+
+# =========================================================================
 # MAIN APP
 # =========================================================================
 def main():
     st.set_page_config(page_title="Local Text Editor", layout="wide")
+    check_password()
     st.title("🖼️ Local Text Editor — Image / PDF (Metadata-Safe)")
     st.caption(
         "Everything runs on your own computer. Original EXIF (images) and "
@@ -463,9 +503,19 @@ def main():
                 if sel_box:
                     st.markdown(f"**Editing box #{sel_id}**")
                     new_text = st.text_input("Replacement text", value=sel_box["text"])
+                    default_size = max(10, int(sel_box["height"] * 0.85))
+                    size_col, bold_col = st.columns([2, 1])
+                    with size_col:
+                        chosen_size = st.slider(
+                            "Font size (make it bigger/smaller to match the original)",
+                            min_value=6, max_value=200, value=default_size, key=f"size_{sel_id}",
+                        )
+                    with bold_col:
+                        chosen_bold = st.checkbox("Bold", key=f"bold_{sel_id}")
                     if st.button("✅ Apply edit"):
                         st.session_state.img_working = apply_image_edit(
-                            st.session_state.img_working, sel_box, new_text
+                            st.session_state.img_working, sel_box, new_text,
+                            font_size=chosen_size, bold=chosen_bold,
                         )
                         st.session_state.selected_id = None
                         st.session_state.boxes = []  # boxes are stale after an edit
