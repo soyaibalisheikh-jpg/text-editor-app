@@ -160,18 +160,41 @@ def detect_image_text(image: Image.Image, min_conf: int):
         groups.setdefault(key, []).append(i)
 
     boxes = []
-    for gid, (_, idxs) in enumerate(groups.items()):
-        words = [data["text"][i] for i in idxs]
-        text = " ".join(words)
-        lefts = [data["left"][i] for i in idxs]
-        tops = [data["top"][i] for i in idxs]
-        rights = [data["left"][i] + data["width"][i] for i in idxs]
-        bottoms = [data["top"][i] + data["height"][i] for i in idxs]
-        x0, y0, x1, y1 = min(lefts), min(tops), max(rights), max(bottoms)
-        boxes.append(
-            {"id": gid, "text": text, "left": x0, "top": y0,
-             "width": x1 - x0, "height": y1 - y0}
-        )
+    gid = 0
+    for _, idxs in groups.items():
+        # A single OCR "line" often contains a form LABEL and its VALUE
+        # side by side (e.g. "Source Account Name    ATAUR RAHMAN"). If we
+        # treated the whole line as one editable box, editing the value
+        # would also overwrite/erase the label. So we split the line into
+        # separate boxes wherever there's an unusually large horizontal
+        # gap between consecutive words (bigger than a normal word-space).
+        idxs = sorted(idxs, key=lambda i: data["left"][i])
+        heights = [data["height"][i] for i in idxs]
+        avg_h = sum(heights) / len(heights) if heights else 20
+        gap_threshold = max(25, avg_h * 1.8)
+
+        subgroups = [[idxs[0]]]
+        for prev_i, curr_i in zip(idxs, idxs[1:]):
+            prev_right = data["left"][prev_i] + data["width"][prev_i]
+            gap = data["left"][curr_i] - prev_right
+            if gap > gap_threshold:
+                subgroups.append([curr_i])
+            else:
+                subgroups[-1].append(curr_i)
+
+        for sub in subgroups:
+            words = [data["text"][i] for i in sub]
+            text = " ".join(words)
+            lefts = [data["left"][i] for i in sub]
+            tops = [data["top"][i] for i in sub]
+            rights = [data["left"][i] + data["width"][i] for i in sub]
+            bottoms = [data["top"][i] + data["height"][i] for i in sub]
+            x0, y0, x1, y1 = min(lefts), min(tops), max(rights), max(bottoms)
+            boxes.append(
+                {"id": gid, "text": text, "left": x0, "top": y0,
+                 "width": x1 - x0, "height": y1 - y0}
+            )
+            gid += 1
     return boxes
 
 
@@ -235,29 +258,48 @@ def detect_pdf_text(page, zoom):
     line_id = 0
     for block in d.get("blocks", []):
         for line in block.get("lines", []):
-            spans = line.get("spans", [])
-            text = "".join(s["text"] for s in spans).strip()
-            if not text:
+            spans = [s for s in line.get("spans", []) if s["text"].strip()]
+            if not spans:
                 continue
-            x0 = min(s["bbox"][0] for s in spans)
-            y0 = min(s["bbox"][1] for s in spans)
-            x1 = max(s["bbox"][2] for s in spans)
-            y1 = max(s["bbox"][3] for s in spans)
-            font_size = spans[0].get("size", 11)
-            color_int = spans[0].get("color", 0)
-            r = ((color_int >> 16) & 255) / 255
-            g = ((color_int >> 8) & 255) / 255
-            b = (color_int & 255) / 255
-            boxes.append({
-                "id": line_id,
-                "text": text,
-                "pdf_rect": fitz.Rect(x0, y0, x1, y1),
-                "font_size": font_size,
-                "color": (r, g, b),
-                "left": x0 * zoom, "top": y0 * zoom,
-                "width": (x1 - x0) * zoom, "height": (y1 - y0) * zoom,
-            })
-            line_id += 1
+            # Same idea as the image OCR path: don't merge a form LABEL
+            # and its VALUE into one box just because they're on the same
+            # line. Split wherever the horizontal gap between spans is
+            # much bigger than normal letter/word spacing.
+            spans = sorted(spans, key=lambda s: s["bbox"][0])
+            avg_size = sum(s.get("size", 11) for s in spans) / len(spans)
+            gap_threshold = max(12, avg_size * 1.5)
+
+            subgroups = [[spans[0]]]
+            for prev_s, curr_s in zip(spans, spans[1:]):
+                gap = curr_s["bbox"][0] - prev_s["bbox"][2]
+                if gap > gap_threshold:
+                    subgroups.append([curr_s])
+                else:
+                    subgroups[-1].append(curr_s)
+
+            for sub in subgroups:
+                text = "".join(s["text"] for s in sub).strip()
+                if not text:
+                    continue
+                x0 = min(s["bbox"][0] for s in sub)
+                y0 = min(s["bbox"][1] for s in sub)
+                x1 = max(s["bbox"][2] for s in sub)
+                y1 = max(s["bbox"][3] for s in sub)
+                font_size = sub[0].get("size", 11)
+                color_int = sub[0].get("color", 0)
+                r = ((color_int >> 16) & 255) / 255
+                g = ((color_int >> 8) & 255) / 255
+                b = (color_int & 255) / 255
+                boxes.append({
+                    "id": line_id,
+                    "text": text,
+                    "pdf_rect": fitz.Rect(x0, y0, x1, y1),
+                    "font_size": font_size,
+                    "color": (r, g, b),
+                    "left": x0 * zoom, "top": y0 * zoom,
+                    "width": (x1 - x0) * zoom, "height": (y1 - y0) * zoom,
+                })
+                line_id += 1
     return boxes
 
 
