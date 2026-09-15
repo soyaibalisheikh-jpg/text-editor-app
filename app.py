@@ -286,6 +286,8 @@ def detect_pdf_text(page, zoom):
                 x1 = max(s["bbox"][2] for s in sub)
                 y1 = max(s["bbox"][3] for s in sub)
                 font_size = sub[0].get("size", 11)
+                font_name = sub[0].get("font", "")
+                font_flags = sub[0].get("flags", 0)
                 color_int = sub[0].get("color", 0)
                 r = ((color_int >> 16) & 255) / 255
                 g = ((color_int >> 8) & 255) / 255
@@ -295,12 +297,47 @@ def detect_pdf_text(page, zoom):
                     "text": text,
                     "pdf_rect": fitz.Rect(x0, y0, x1, y1),
                     "font_size": font_size,
+                    "font_name": font_name,
+                    "font_flags": font_flags,
                     "color": (r, g, b),
                     "left": x0 * zoom, "top": y0 * zoom,
                     "width": (x1 - x0) * zoom, "height": (y1 - y0) * zoom,
                 })
                 line_id += 1
     return boxes
+
+
+def get_exact_pdf_font(page, font_name):
+    """Try to pull the ORIGINAL embedded font (the exact typeface used in
+    the document) so replacement text can reuse it instead of a generic
+    substitute. Returns (fontname_to_use, font_bytes_or_None)."""
+    try:
+        doc = page.parent
+        for f in page.get_fonts(full=True):
+            xref, ext, ftype, basefont, name, encoding = f[:6]
+            if basefont == font_name or name == font_name:
+                extracted = doc.extract_font(xref)
+                buffer = extracted[-1] if extracted else None
+                if buffer:
+                    return f"embedded-{xref}", buffer
+    except Exception:
+        pass
+    return None, None
+
+
+def fallback_base14_font(font_flags: int) -> str:
+    """No embedded font available (e.g. it uses one of the 14 standard
+    PDF fonts, which aren't embedded as files) -- pick the closest
+    standard font, matching bold/italic from the original span's flags."""
+    bold = bool(font_flags & 2 ** 4)
+    italic = bool(font_flags & 2 ** 1)
+    if bold and italic:
+        return "hebi"
+    if bold:
+        return "hebo"
+    if italic:
+        return "heit"
+    return "helv"
 
 
 def sample_pdf_bg_color(page, rect: fitz.Rect):
@@ -317,12 +354,23 @@ def sample_pdf_bg_color(page, rect: fitz.Rect):
 def apply_pdf_edit(page, box, new_text: str):
     rect = box["pdf_rect"]
     bg_color = sample_pdf_bg_color(page, rect)
+
+    # Reuse the ORIGINAL font (same typeface, not just same size/color)
+    # whenever the document has it embedded; otherwise fall back to the
+    # closest standard font, still matching bold/italic.
+    fontname, font_bytes = get_exact_pdf_font(page, box.get("font_name", ""))
+    if font_bytes:
+        page.insert_font(fontname=fontname, fontbuffer=font_bytes)
+    else:
+        fontname = fallback_base14_font(box.get("font_flags", 0))
+
     page.add_redact_annot(rect, fill=bg_color)
     page.apply_redactions()
     page.insert_text(
         (rect.x0, rect.y1 - 1),
         new_text,
         fontsize=box["font_size"],
+        fontname=fontname,
         color=box["color"],
     )
 
